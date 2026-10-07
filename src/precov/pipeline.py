@@ -15,7 +15,6 @@ control flow of Sec. 3 end to end.
 from __future__ import annotations
 
 from typing import Callable, List, Optional
-
 import numpy as np
 from astropy.time import Time
 
@@ -35,11 +34,10 @@ from .orbits.propagator import Propagator
 from .orbits.sampling import sample_boundary_orbits
 from .survey.base import SurveyProvider
 
-
 class PrediscoveryPipeline:
     def __init__(self, propagator: Propagator, survey: SurveyProvider,
                  H: float, G: float = 0.15,
-                 fine_propagator: Optional[Propagator] = None,
+                 fine_propagator: Optional[Propagator] = None, # NEW: For precise linking
                  M_samples: int = DEFAULT_BOUNDARY_SAMPLES_M,
                  confidence_q: float = DEFAULT_CONFIDENCE_Q,
                  detection_sigma: float = DEFAULT_DETECTION_SIGMA,
@@ -58,11 +56,6 @@ class PrediscoveryPipeline:
         fine_propagator : Propagator, optional
             The 'fine' propagator used for Stage 5 (candidate refitting, likelihoods).
             Typically ASSISTPropagator for N-body accuracy. If None, defaults to `propagator`.
-        survey : SurveyProvider
-            Source of candidate images and pixel data.
-        H, G : float
-            Absolute magnitude and slope parameter for the H-G photometric
-            model (Sec. 3.2). Use G=0.15 when unmeasured, per the paper.
         """
         self.propagator = propagator
         self.fine_propagator = fine_propagator if fine_propagator is not None else propagator
@@ -80,7 +73,8 @@ class PrediscoveryPipeline:
 
     def run(self, postdiscovery_obs: List[Observation], theta0_guess: np.ndarray) -> PrediscoveryResult:
         # --- Stage 1: robust postdiscovery orbit fit (Sec. 3.1) ---
-        fit = fit_orbit(postdiscovery_obs, self.propagator, theta0_guess, c=self.huber_c)
+        # Use fine_propagator for the initial fit if available, as it sets the baseline for the rest
+        fit = fit_orbit(postdiscovery_obs, self.fine_propagator, theta0_guess, c=self.huber_c)
 
         # --- Stage 2: boundary iso-surface sample of the 6D ellipsoid (Sec. 3.2) ---
         theta_samples = sample_boundary_orbits(
@@ -91,6 +85,7 @@ class PrediscoveryPipeline:
         images = {img.image_id: img for img in self.survey.list_images()}
         search_regions = {}
         for image_id, image in images.items():
+            # Use COARSE propagator here for speed (wide search)
             viable, V_pred = photometric_viability(
                 fit.theta, image.t, self.H, self.G, image.limiting_mag_3sigma,
                 self.propagator, buffer_mag=self.mag_buffer,
@@ -123,11 +118,11 @@ class PrediscoveryPipeline:
 
         # --- Stage 5: candidate refit + probabilistic linking (Sec. 3.4-3.5) ---
         null_lookup = NullMomentLookup(alpha=self.alpha)
+        # Use FINE propagator here for precise likelihood evaluation
         all_results = link_all_candidates(
-            postdiscovery_obs,
-            self.fine_propagator,
-            fit.theta, search_images, catalogs,
-            null_lookup, alpha=self.alpha, huber_c=self.huber_c,
+            postdiscovery_obs, self.fine_propagator, fit.theta, search_images, catalogs,
+            null_lookup, alpha=self.alpha, huber_c=self.huber_c, 
+            significance_threshold=self.significance_threshold,
         )
 
         # --- Stage 6: significance threshold + mutual consensus (Sec. 3.6) ---
@@ -142,9 +137,7 @@ class PrediscoveryPipeline:
                 for r in confirmed
             ]
             joint_fit = fit_orbit(
-                postdiscovery_obs + candidate_obs, 
-                self.fine_propagator,
-                fit.theta, c=self.huber_c,
+                postdiscovery_obs + candidate_obs, self.fine_propagator, fit.theta, c=self.huber_c,
             )
 
         return PrediscoveryResult(
