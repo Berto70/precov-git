@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precov"
+version = "0.1.0"
+description = "A probabilistic asteroid prediscovery pipeline, after Li, Geringer-Sameth & Golovich (2026), AJ 172:91"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Pablo & Claudio (reproduction study)" },
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "astropy>=5.3",
+]
+
+[project.optional-dependencies]
+# Real low-threshold source extraction (DAOFIND). Falls back to a local-maxima
+# detector if not installed -- see precov.images.detection.
+detection = ["photutils>=1.9"]
+# Real high-precision dynamics (IAS15 + DE441). Requires separately-obtained
+# SPICE-like kernel files -- see precov.orbits.propagator.ASSISTPropagator.
+dynamics = ["rebound>=4.0", "assist>=1.2"]
+dev = ["pytest>=7.0", "pytest-cov"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
