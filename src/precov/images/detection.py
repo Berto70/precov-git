@@ -14,6 +14,14 @@ the rest of the pipeline (which only requires a list of centroids, fluxes,
 and a background source density) can be exercised without the optional
 dependency.
 """
+
+# TODO (Sec 5.1): Implement streak-matched filtering for fast-moving NEAs. 
+# DAOStarFinder suffers from severe trailing losses in 30s exposures. 
+# We need to calculate expected trail length/orientation from the trial orbit's 
+# proper motion and convolve with a line kernel. If detected as a streak, 
+# upgrade CandidateSource to a 4D state (x, y, dx_trail, dy_trail) and add 
+# the appropriate additive term to the log-likelihood statistic.
+
 from __future__ import annotations
 
 from typing import Optional, Tuple

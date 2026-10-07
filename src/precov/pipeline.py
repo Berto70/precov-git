@@ -39,6 +39,7 @@ from .survey.base import SurveyProvider
 class PrediscoveryPipeline:
     def __init__(self, propagator: Propagator, survey: SurveyProvider,
                  H: float, G: float = 0.15,
+                 fine_propagator: Optional[Propagator] = None,
                  M_samples: int = DEFAULT_BOUNDARY_SAMPLES_M,
                  confidence_q: float = DEFAULT_CONFIDENCE_Q,
                  detection_sigma: float = DEFAULT_DETECTION_SIGMA,
@@ -52,8 +53,11 @@ class PrediscoveryPipeline:
         Parameters
         ----------
         propagator : Propagator
-            Must be constructed with its reference epoch already set (e.g.
-            the survey midpoint, per Sec. 3.1); reused for every stage.
+            The 'coarse' propagator used for Stage 3 (viability gating, convex hulls).
+            Typically TwoBodyKeplerPropagator for speed.
+        fine_propagator : Propagator, optional
+            The 'fine' propagator used for Stage 5 (candidate refitting, likelihoods).
+            Typically ASSISTPropagator for N-body accuracy. If None, defaults to `propagator`.
         survey : SurveyProvider
             Source of candidate images and pixel data.
         H, G : float
@@ -61,6 +65,7 @@ class PrediscoveryPipeline:
             model (Sec. 3.2). Use G=0.15 when unmeasured, per the paper.
         """
         self.propagator = propagator
+        self.fine_propagator = fine_propagator if fine_propagator is not None else propagator
         self.survey = survey
         self.H, self.G = H, G
         self.M_samples = M_samples
@@ -119,7 +124,9 @@ class PrediscoveryPipeline:
         # --- Stage 5: candidate refit + probabilistic linking (Sec. 3.4-3.5) ---
         null_lookup = NullMomentLookup(alpha=self.alpha)
         all_results = link_all_candidates(
-            postdiscovery_obs, self.propagator, fit.theta, search_images, catalogs,
+            postdiscovery_obs,
+            self.fine_propagator,
+            fit.theta, search_images, catalogs,
             null_lookup, alpha=self.alpha, huber_c=self.huber_c,
         )
 
@@ -135,7 +142,9 @@ class PrediscoveryPipeline:
                 for r in confirmed
             ]
             joint_fit = fit_orbit(
-                postdiscovery_obs + candidate_obs, self.propagator, fit.theta, c=self.huber_c,
+                postdiscovery_obs + candidate_obs, 
+                self.fine_propagator,
+                fit.theta, c=self.huber_c,
             )
 
         return PrediscoveryResult(

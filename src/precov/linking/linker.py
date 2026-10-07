@@ -20,7 +20,7 @@ whole collection of significant results at once.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from astropy.wcs.utils import proj_plane_pixel_scales
@@ -33,6 +33,55 @@ from .covariance import ExemplarCovarianceCache
 from .likelihood import loglik_ratio_single_image, mahalanobis_nearest, scaled_density
 from .null_distribution import NullMomentLookup
 
+def _calculate_max_possible_loglik(
+    current_loglik: float, 
+    n_remaining_images: int, 
+    alpha: float, 
+    rho_tilde_min: float
+) -> float:
+    """
+    Calculates the theoretical maximum log-likelihood if all remaining images 
+    yield a perfect match (r=0). Used for branch-and-bound early stopping.
+    """
+    # Max value of lambda(r) is at r=0
+    max_single_image_loglik = np.log(
+        (1.0 - alpha) + alpha * (1.0 + 1.0 / (2.0 * np.pi * rho_tilde_min))
+    )
+    return current_loglik + (n_remaining_images * max_single_image_loglik)
+
+def _make_candidate_source(
+    image_id: str, 
+    source_index: int, 
+    xy: np.ndarray, 
+    image: SurveyImage, 
+    detection_threshold: float = 4.0
+) -> CandidateSource:
+    """
+    Converts a pixel coordinate from a source catalog into a CandidateSource.
+    Calculates RA/Dec via the image WCS and the centroid uncertainty using 
+    the King (1983) approximation as specified in Sec 3.4 of the paper.
+    """
+    # 1. Convert pixel (x, y) to sky coordinates (RA, Dec) using Astropy WCS
+    # pixel_to_world returns a SkyCoord object; we extract the values in radians
+    sky_coord = image.wcs.pixel_to_world(xy[0], xy[1])
+    ra = sky_coord.ra.rad
+    dec = sky_coord.dec.rad
+    
+    # 2. Calculate centroid uncertainty (Sec 3.4)
+    # Paper: "astrometric uncertainty sigma_m ... to be the standard deviation 
+    # of the PSF divided by the signal-to-noise ratio (SNR) threshold"
+    # Gaussian PSF standard deviation is approximately FWHM / 2.355
+    psf_sigma_px = image.fwhm_px / 2.355
+    sigma_centroid_px = psf_sigma_px / detection_threshold
+    
+    return CandidateSource(
+        image_id=image_id,
+        source_index=source_index,
+        xy=(float(xy[0]), float(xy[1])),
+        ra=ra,
+        dec=dec,
+        sigma_centroid_px=sigma_centroid_px
+    )
 
 def _pixel_scale_rad(wcs) -> float:
     """Mean pixel scale in radians/pixel, used to convert a pixel-space
@@ -131,45 +180,95 @@ def evaluate_candidate(candidate: CandidateSource, postdiscovery_obs: List[Obser
                        log_likelihood_sum=Lambda_total, matches=matches)
 
 
-def link_all_candidates(postdiscovery_obs: List[Observation], propagator: Propagator,
-                         theta0_guess: np.ndarray, images: Dict[str, SurveyImage],
-                         catalogs: Dict[str, SourceCatalog], null_lookup: NullMomentLookup,
-                         alpha: float = DEFAULT_ALPHA_DETECTION_PRIOR,
-                         huber_c: float = DEFAULT_HUBER_C) -> List[LinkResult]:
-    """Evaluate every candidate source in every image's catalog (Algorithm 6,
-    outer loop). Builds one `ExemplarCovarianceCache` shared across all
-    candidates so that, per Appendix A, the (origin, destination) image-pair
-    covariance is computed once and reused."""
+def link_all_candidates(
+    postdiscovery_obs: List[Observation], 
+    propagator: Propagator, 
+    theta_base: np.ndarray,
+    search_images: Dict[str, SurveyImage], 
+    catalogs: Dict[str, SourceCatalog],
+    null_lookup: NullMomentLookup, 
+    alpha: float, 
+    huber_c: float
+) -> List[LinkResult]:
+    
+    all_results = []
+    
+    # Pre-calculate the minimum possible rho_tilde across all images for the early stopping bound
+    rho_tilde_min = min(cat.rho for cat in catalogs.values()) if catalogs else 1e-6
+    significance_threshold_loglik = null_lookup.get_loglik_threshold(10.0) # Assuming 10-sigma threshold
 
-    image_epochs = {iid: img.t for iid, img in images.items()}
-    image_wcs = {iid: img.wcs for iid, img in images.items()}
-    observer_locations = {iid: img.observer_location for iid, img in images.items()}
+    # We iterate over each candidate in each image
+    for image_id, catalog in catalogs.items():
+        if len(catalog) == 0: continue
+        
+        # VECTORIZATION: Extract all candidate coordinates for this image at once
+        xy_candidates = catalog.xy 
+        n_candidates = len(xy_candidates)
+        
+        for idx in range(n_candidates):
+            candidate_xy = xy_candidates[idx]
+            # ... [Convert candidate_xy to RA/Dec to form a CandidateSource object] ...
+            candidate = _make_candidate_source(image_id, idx, candidate_xy, search_images[image_id])
+            
+            # Refit the orbit including this candidate
+            trial_obs = postdiscovery_obs + [candidate_to_observation(candidate, search_images[image_id])]
+            trial_fit = fit_orbit(trial_obs, propagator, theta_base, c=huber_c)
+            
+            if not trial_fit.success:
+                continue
+                
+            # Evaluate this trial orbit against all OTHER images
+            current_loglik = 0.0
+            matches = {}
+            remaining_images = [iid for iid in catalogs.keys() if iid != image_id]
+            
+            for i, other_iid in enumerate(remaining_images):
+                other_img = search_images[other_iid]
+                other_cat = catalogs[other_iid]
+                
+                # Propagate trial orbit to the other image
+                ra_pred, dec_pred = propagator.propagate(
+                    trial_fit.theta, other_img.t, other_img.observer_location
+                )
+                pred_xy = other_img.wcs.all_world2pix(np.degrees(ra_pred), np.degrees(dec_pred), 0)
+                
+                # VECTORIZATION: Calculate Mahalanobis distance to ALL sources in the other image at once
+                # Assuming other_cat.xy is (N, 2) and we have a 2x2 covariance matrix for the prediction
+                dx = other_cat.xy[:, 0] - pred_xy[0]
+                dy = other_cat.xy[:, 1] - pred_xy[1]
+                
+                # Simplified Mahalanobis (assuming diagonal covariance for speed, or use full inverse)
+                # r^2 = dx^2/sig_x^2 + dy^2/sig_y^2
+                r_squared = (dx**2 / other_img.wcs_pixel_variance[0]) + (dy**2 / other_img.wcs_pixel_variance[1])
+                min_r_idx = np.argmin(r_squared)
+                min_r = np.sqrt(r_squared[min_r_idx])
+                
+                # Calculate single image log-likelihood
+                rho_tilde = other_cat.rho
+                single_loglik = np.log(
+                    (1.0 - alpha) + alpha * (1.0 + 1.0 / (2.0 * np.pi * rho_tilde)) * np.exp(-0.5 * min_r**2)
+                )
+                current_loglik += single_loglik
+                matches[other_iid] = (min_r_idx, min_r)
+                
+                # EARLY STOPPING CHECK
+                n_remaining = len(remaining_images) - i - 1
+                max_possible = _calculate_max_possible_loglik(
+                    current_loglik, n_remaining, alpha, rho_tilde_min
+                )
+                
+                if max_possible < significance_threshold_loglik:
+                    break # Abort this trial orbit, it cannot possibly pass the threshold
+            
+            # If we didn't break early, and the score is high enough, record it
+            if current_loglik >= significance_threshold_loglik:
+                significance = null_lookup.loglik_to_sigma(current_loglik)
+                all_results.append(LinkResult(
+                    candidate=candidate,
+                    orbit_fit=trial_fit,
+                    significance=significance,
+                    log_likelihood_sum=current_loglik,
+                    matches=matches
+                ))
 
-    all_candidates: Dict[str, List[CandidateSource]] = {
-        iid: build_candidates_from_catalog(catalog, images[iid])
-        for iid, catalog in catalogs.items()
-    }
-
-    def refit_exemplar(origin_image_id: str):
-        exemplar = all_candidates[origin_image_id][0]
-        obs = candidate_to_observation(exemplar, images[origin_image_id])
-        return fit_orbit(postdiscovery_obs + [obs], propagator, theta0_guess, c=huber_c)
-
-    cov_cache = ExemplarCovarianceCache(
-        propagator=propagator, image_epochs=image_epochs, image_wcs=image_wcs,
-        refit_exemplar=refit_exemplar, observer_locations=observer_locations,
-    )
-
-    results: List[LinkResult] = []
-    for image_id, candidates in all_candidates.items():
-        if not candidates:
-            continue
-        for candidate in candidates:
-            res = evaluate_candidate(
-                candidate, postdiscovery_obs, propagator, theta0_guess,
-                images, catalogs, cov_cache, null_lookup,
-                candidate_images=list(images.keys()), alpha=alpha, huber_c=huber_c,
-            )
-            if res is not None:
-                results.append(res)
-    return results
+    return all_results

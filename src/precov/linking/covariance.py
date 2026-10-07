@@ -33,6 +33,13 @@ exemplar orbit on first use (via a caller-supplied callback, to avoid a
 circular dependency on the fitting/linking orchestration layer), and caches
 the resulting Sigma^mm' per (origin, destination) pair.
 """
+
+# TODO: The 12-integration first-order Taylor expansion (Jacobian) mapping 6D 
+# orbital covariance to 2D image-space covariance breaks down for highly uncertain 
+# orbits (MPC U >= 7) or very long look-backs. Implement a Monte Carlo fallback: 
+# if the Jacobian condition number is high, or if delta_t > 2 years, automatically 
+# sample 1,000 orbits from the covariance ellipsoid and compute the empirical 2D covariance.
+
 from __future__ import annotations
 
 from typing import Callable, Dict, Optional, Tuple

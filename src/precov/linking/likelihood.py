@@ -32,6 +32,13 @@ substitution back into f0/f1 and was rejected (see
 tests/test_likelihood.py::test_loglik_ratio_negative_for_distant_or_crowded_case,
 which caught the discrepancy empirically before we re-derived symbolically).
 """
+
+# TODO: Replace the constant scalar rho_m (background density) with a spatially 
+# varying 2D density map. While ZTF difference images subtract static backgrounds, 
+# crowded stellar fields or noise artifacts still cause local density fluctuations. 
+# Implement a 2D Kernel Density Estimation (KDE) or adaptive grid on background 
+# sources outside the search region to prevent false positives in crowded areas.
+
 from __future__ import annotations
 
 from typing import Tuple
