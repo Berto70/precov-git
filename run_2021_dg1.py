@@ -155,7 +155,7 @@ def main():
     
     # 4. Set up the propagators (Hybrid Strategy)
     print("\n[4/5] Setting up propagators and downloading ephemeris kernels...")
-    epoch = Time("2021-03-01T00:00:00", scale="tdb")
+    epoch = Time("2020-30-06T12:00:00", scale="tdb")
     coarse_propagator = TwoBodyKeplerPropagator(epoch=epoch)
     
     planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=False)
@@ -168,7 +168,8 @@ def main():
 
     # 5. Load Survey Provider and Run Pipeline
     print("\n[5/5] Loading ZTF survey provider and running pipeline...")
-    provider = ZTFDifferenceImageProvider.from_manifest(manifest_path)
+    #provider = ZTFDifferenceImageProvider.from_manifest(manifest_path)
+    provider = ZTFDifferenceImageProvider.from_directory(local_image_dir)
     images = provider.list_images()
     print(f"Provider successfully loaded {len(images)} ZTF difference images.")
 
