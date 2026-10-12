@@ -34,6 +34,7 @@ from typing import Optional
 import numpy as np
 from astropy.time import Time
 from astropy.coordinates import get_body_barycentric, EarthLocation
+import astropy.units as u
 
 from ..constants import C_AU_PER_DAY
 from ..data_models import Geometry
@@ -114,6 +115,7 @@ class TwoBodyKeplerPropagator(Propagator):
 
     def geometry(self, theta: np.ndarray, t: Time,
                  observer_location: Optional[EarthLocation] = None) -> Geometry:
+        
         theta = np.asarray(theta, dtype=float)
         dt_days = (t - self.epoch).jd  # scalar Time -> scalar dt
 
@@ -152,7 +154,7 @@ class ASSISTPropagator(Propagator):
     downloaded automatically by this class.
     """
 
-    def __init__(self, epoch: Time, planets_path: str, asteroids_path: Optional[str] = None,
+    def __init__(self, object: str, epoch: Time, planets_path: str, asteroids_path: Optional[str] = None,
                  light_time_iterations: int = 3):
         try:
             import rebound  # noqa: F401
@@ -165,42 +167,60 @@ class ASSISTPropagator(Propagator):
                 "for how to obtain them."
             ) from exc
 
+        self.object = object
         self.epoch = epoch
         self.light_time_iterations = light_time_iterations
         self._ephem = assist.Ephem(planets_path, asteroids_path)
         self._assist = assist
         self._rebound = rebound
 
-    def geometry(self, theta: np.ndarray, t: Time,
+    def geometry(self, theta: Optional[np.ndarray] = None, t: Optional[Time] = None,
                  observer_location: Optional[EarthLocation] = None) -> Geometry:
         """Return the Geometry (RA, Dec, r_helio, r_topo, phase angle) of the
-        body described by Keplerian elements `theta` (defined at this
-        propagator's reference epoch) as seen at time `t`, using full N-body
-        dynamics via REBOUND + ASSIST + JPL DE441.
+        configured object as seen at time `t`, using full N-body dynamics via
+        REBOUND + ASSIST + JPL DE441.
+
+        ``theta`` is accepted for compatibility with :class:`Propagator` but
+        is ignored: ASSIST obtains the object's initial state from
+        ``self.object`` and the asteroid ephemeris kernel.
         
         Follows the exact control flow of TwoBodyKeplerPropagator.geometry:
-        1. Convert Keplerian elements -> heliocentric Cartesian state at epoch
+        1. Load the object's heliocentric Cartesian state from the kernel
         2. Integrate N-body to target time t
         3. Iterate for light travel time (typically 2-3 iterations)
         4. Compute topocentric position, RA/Dec, phase angle
         """
         import rebound
+
+        if t is None:
+            raise TypeError("ASSISTPropagator.geometry() requires t=...")
         
         # Unpack Keplerian elements: (a, e, i, raan, argp, M)
-        a, e, i, raan, argp, M = theta
+        #a, e, i, raan, argp, M = theta
         
         # --- Step 1: Initial setup of the REBOUND simulation ---
         sim = rebound.Simulation()
         sim.units = ('AU', 'day', 'Msun')
+
+        sim.ri_ias15.dt = 0.1
+        sim.ri_ias15.epsilon = 10e-10
         
         # Attach ASSIST extras (provides planetary perturbations from JPL DE441)
-        extras = self._assist.Extras(sim, self._ephem)  # noqa: F841
+        extras = self._assist.Extras(sim, self._ephem)
+
+        # extras.gr_eih_sources = 11 # Turn on general relativistic corrections for all bodies
+        # with 2021 DG1 +30 seconds using the corrections
         
         # Set simulation time to the reference epoch
-        sim.t = self.epoch.jd
+        sim.t = self.epoch.jd - self._ephem.jd_ref # time is always relative to jd_ref
+
+        # sim.ri_ias15.adaptive_mode = 2 # better timestep for close encounters Pham+24
+        # prob never ending 
 
         sim.add(m=1.0)  # Sun at origin
-        
+        sim.add(self.object, plane="frame", date=f"JD{self.epoch.jd}")
+
+        """
         # Add massless test particle with the given orbital elements
         # Elements are heliocentric (relative to the Sun, which ASSIST handles)
         sim.add(m=0, a=a, e=e, inc=i, Omega=raan, omega=argp, M=M)
@@ -210,17 +230,17 @@ class ASSISTPropagator(Propagator):
         
         # --- Step 2: Integrate to target time (initial pass) ---
         sim.integrate(t.jd)
+        """
         
         # Get the test particle's heliocentric Cartesian state
-        particle = sim.particles[0]
+        particle = sim.particles[1]
         
         # --- Step 3: Light-time iteration ---
         # We iteratively refine the emission time: t_emit = t_obs - |r_topo|/c
-        # c in AU/day = 173.14463267424034
-        c_au_per_day = 173.14463267424034
+        # c in AU/day = 173.14463267424034 --> C_AU_PER_DAY
         
         # Initial guess: the asteroid is seen at the observation time t
-        t_emit = t.jd
+        t_emit = t.jd - self._ephem.jd_ref
         
         for iteration in range(self.light_time_iterations):
             # Get observer (Earth center) position from ephemeris at t_emit
@@ -238,7 +258,8 @@ class ASSISTPropagator(Propagator):
             if observer_location is not None:
                 # Get Earth's sidereal time at t_emit to rotate EarthLocation to ICRS
                 # For simplicity, use astropy's EarthLocation -> ITRS -> GCRS transform
-                t_emit_time = Time(t_emit, format='jd', scale='tdb')
+                absolute_emit_jd = self._ephem.jd_ref + t_emit
+                t_emit_time = Time(absolute_emit_jd, format="jd", scale="tdb")
                 # Convert EarthLocation to GCRS Cartesian (AU)
                 # EarthLocation is geocentric; GCRS gives position in ICRS frame
                 from astropy.coordinates import GCRS
@@ -249,9 +270,21 @@ class ASSISTPropagator(Propagator):
                 obs_y += obs_cart.y.to(u.AU).value
                 obs_z += obs_cart.z.to(u.AU).value
             
+            # curr_time = sim.t
+            # step_days = 0.01
+
+            # if t_emit >= curr_time:
+            #     direction = 1.0
+            # else:
+            #     direction = -1.0
+
+            # while abs(t_emit - curr_time) > step_days:
+            #     curr_time += direction * step_days
+            #     sim.integrate(curr_time)
+            
             # Integrate particle to the refined emission time
             sim.integrate(t_emit)
-            particle = sim.particles[0]
+            particle = sim.particles[1]
             
             # Heliocentric position of asteroid (AU)
             ast_x, ast_y, ast_z = particle.x, particle.y, particle.z
@@ -263,7 +296,7 @@ class ASSISTPropagator(Propagator):
             r_topo = np.sqrt(dx**2 + dy**2 + dz**2)
             
             # Refine emission time for next iteration
-            t_emit = t.jd - r_topo / c_au_per_day
+            t_emit = (t.jd - self._ephem.jd_ref) - r_topo / C_AU_PER_DAY
         
         # --- Step 4: Compute final geometry ---
         # Heliocentric distance
@@ -295,5 +328,6 @@ class ASSISTPropagator(Propagator):
             dec=dec,
             r_helio=r_helio,
             r_topo=r_topo,
-            phase_angle=phase_angle
+            phase_angle=phase_angle,
+            light_time=r_topo / C_AU_PER_DAY
         )
