@@ -23,6 +23,8 @@ from precov.orbits.propagator import TwoBodyKeplerPropagator, ASSISTPropagator
 from precov.data.mpc_fetcher import fetch_postdiscovery_observations
 from precov.orbits.kernels import ensure_kernels_downloaded
 
+from time import time
+
 # ZTF pixel scale is ~1.01 arcsec/pixel
 ZTF_PIXEL_SCALE = 1.01 
 
@@ -158,7 +160,7 @@ def main():
     epoch = Time("2021-03-11T12:00:00", scale="tdb")
     coarse_propagator = TwoBodyKeplerPropagator(epoch=epoch)
     
-    planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=True)
+    planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=False)
     try:
         fine_propagator = ASSISTPropagator(epoch=epoch, planets_path=planets_path, asteroids_path=asteroids_path)
         print("Successfully initialized ASSISTPropagator (N-body).")
@@ -173,6 +175,8 @@ def main():
     images = provider.list_images()
     print(f"Provider successfully loaded {len(images)} ZTF difference images.")
 
+    time_in = time()
+
     pipeline = PrediscoveryPipeline(
         propagator=coarse_propagator,       # Fast Two-Body for wide search
         fine_propagator=fine_propagator,    # Precise ASSIST for linking
@@ -185,12 +189,15 @@ def main():
         hull_buffer_px=500.0,               # 500 px buffer to avoid banana artifacts
         mag_buffer=1.0,                     # Soften magnitude threshold
         alpha=0.5,                          # Prior probability of detection
-        significance_threshold=10.0,        # >10 sigma separates prediscoveries
+        significance_threshold=0.0,        # >10 sigma separates prediscoveries
         huber_c=1.0,                        # Huber loss factor for robust fitting
     )
 
     print("\nRunning pipeline (this may take a while depending on image count)...")
     result = pipeline.run(postdiscovery_obs, theta0_guess)
+
+    time_out = time()
+    print(f"\nPipeline completed in {time_out - time_in:.2f} seconds.")
 
     # 6. Print results
     print("\n" + "="*70)
