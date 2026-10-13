@@ -131,19 +131,19 @@ def main():
     print("="*70)
 
     target = "2021 DG1"
-    most_csv = "data/most_2021dg1.csv"       # <-- UPDATE THIS to your exported CSV
-    local_image_dir = "/media/gbertinelli/wd-gbertine/ztf_diffs"     # <-- UPDATE THIS to your local folder of diffimgs
+    # most_csv = "data/most_2021dg1.csv"       # <-- UPDATE THIS to your exported CSV
+    local_image_dir = "/media/gbertinelli/wd-gbertine/ztf_diffs/fits"     # <-- UPDATE THIS to your local folder of diffimgs
     manifest_path = "data/ztf_most_manifest.csv"
     
-    if not Path(most_csv).exists():
-        print(f"ERROR: {most_csv} not found. Please export your MOST table as a CSV first.")
-        sys.exit(1)
+        # if not Path(most_csv).exists():
+        #     print(f"ERROR: {most_csv} not found. Please export your MOST table as a CSV first.")
+        #     sys.exit(1)
         
     Path("data").mkdir(exist_ok=True)
     
     # 1. Convert MOST CSV to precov manifest
     print("\n[1/5] Translating MOST CSV to precov manifest...")
-    most_csv_to_manifest(most_csv, manifest_path, local_image_dir)
+    # most_csv_to_manifest(most_csv, manifest_path, local_image_dir)
     
     # 2. Get post-discovery observations from MPC
     print("\n[2/5] Fetching post-discovery observations from MPC...")
@@ -155,10 +155,10 @@ def main():
     
     # 4. Set up the propagators (Hybrid Strategy)
     print("\n[4/5] Setting up propagators and downloading ephemeris kernels...")
-    epoch = Time("2020-30-06T12:00:00", scale="tdb")
+    epoch = Time("2021-03-11T12:00:00", scale="tdb")
     coarse_propagator = TwoBodyKeplerPropagator(epoch=epoch)
     
-    planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=False)
+    planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=True)
     try:
         fine_propagator = ASSISTPropagator(epoch=epoch, planets_path=planets_path, asteroids_path=asteroids_path)
         print("Successfully initialized ASSISTPropagator (N-body).")
