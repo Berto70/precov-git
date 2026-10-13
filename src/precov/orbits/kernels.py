@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Tuple
 
 # JPL Horizons URLs for standard ephemeris files
-DE441_URL = "https://ssd.jpl.nasa.gov/ftp/eph/planets/Linux/de441/linux_m13000p17000.441"
+# DE441_URL = "https://ssd.jpl.nasa.gov/ftp/eph/planets/Linux/de441/linux_m13000p17000.441"
+DE441_URL = "https://ssd.jpl.nasa.gov/ftp/eph/planets/bsp/de441.bsp"  
 # Note: For asteroid perturbations, one would typically use sb441-n16.bsp or similar.
 # We provide the planetary one here as it's the strict requirement for the base ASSIST integrator.
 SB441_URL = "https://ssd.jpl.nasa.gov/ftp/eph/small_bodies/asteroids_de441/sb441-n16.bsp" 
@@ -45,7 +46,8 @@ def ensure_kernels_downloaded(
         (planets_path, asteroids_path). asteroids_path is None if download_asteroids is False.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    planets_path = cache_dir / "linux_m13000p17000.441"
+    # planets_path = cache_dir / "linux_m13000p17000.441"
+    planets_path = cache_dir / "de441.bsp" 
     asteroids_path = cache_dir / "sb441-n16.bsp" if download_asteroids else None
 
     # Download Planetary Ephemeris
