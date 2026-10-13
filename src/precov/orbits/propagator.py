@@ -147,104 +147,107 @@ class TwoBodyKeplerPropagator(Propagator):
 
 
 class ASSISTPropagator(Propagator):
-    """Real IAS15 + JPL DE441 propagation via `rebound`/`assist`, matching
-    Sec. 3.1 of the paper exactly. Requires the `dynamics` extra and locally
-    supplied ephemeris kernel files (`planets_path`, `asteroids_path`) -- see
-    the `assist` package documentation for how to obtain these; they are not
-    downloaded automatically by this class.
-    """
+    """Real IAS15 + JPL DE441 propagation via rebound/assist.
+    Optimized: uses analytical kepler_to_state instead of temp_sim,
+    caches observer positions, and minimizes integrations."""
 
     def __init__(self, epoch: Time, planets_path: str, asteroids_path: Optional[str] = None,
-                 light_time_iterations: int = 3):
+                 light_time_iterations: int = 2):
         try:
-            import rebound  # noqa: F401
+            import rebound
             import assist
         except ImportError as exc:
-            raise PropagatorBackendUnavailable(
-                "ASSISTPropagator requires the 'rebound' and 'assist' packages "
-                "(pip install precov[dynamics]) plus local JPL DE441 / asteroid "
-                "perturber kernel files. See https://github.com/matthewholman/assist "
-                "for how to obtain them."
-            ) from exc
+            raise PropagatorBackendUnavailable("...") from exc
 
-        # self.object = object
         self.epoch = epoch
         self.light_time_iterations = light_time_iterations
         self._ephem = assist.Ephem(planets_path, asteroids_path)
         self._assist = assist
         self._rebound = rebound
 
+        # Pre-compute the Sun's barycentric state at the reference epoch ONCE
+        self._epoch_tdb = epoch.tdb
+        self._epoch_rel = self._epoch_tdb.jd - self._ephem.jd_ref
+        self._sun_epoch = self._ephem.get_particle("Sun", self._epoch_rel)
+
+        # Cache for observer positions (same pattern as TwoBodyKeplerPropagator)
+        self._observer_cache: dict = {}
+
+    def _cached_observer_barycentric(self, t_tdb: Time, observer_location) -> np.ndarray:
+        """Get observer's barycentric position, cached per (time, location)."""
+        key = (round(t_tdb.jd, 9), id(observer_location))
+        cached = self._observer_cache.get(key)
+        if cached is None:
+            earth = self._ephem.get_particle("Earth", t_tdb.jd - self._ephem.jd_ref)
+            obs = np.array([earth.x, earth.y, earth.z])
+            if observer_location is not None:
+                site_gcrs = observer_location.get_gcrs(t_tdb)
+                obs += site_gcrs.cartesian.xyz.to(u.AU).value
+            cached = obs
+            self._observer_cache[key] = cached
+        return cached
+
     def geometry(self, theta: np.ndarray, t: Time,
-                observer_location: Optional[EarthLocation] = None) -> Geometry:
-            
+                 observer_location: Optional[EarthLocation] = None) -> Geometry:
         import rebound
-        from astropy.coordinates import get_body_barycentric
-        import astropy.units as u
+        from .elements import kepler_to_state_and_vel  # NEW: use analytical velocity
 
-        a, e, i, raan, argp, M = theta
+        theta = np.asarray(theta, dtype=float)
 
-        # --- Step 1: orbital elements (ecliptic) -> ecliptic Cartesian ---
-        temp_sim = rebound.Simulation()
-        temp_sim.units = ('AU', 'day', 'Msun')  
-        temp_sim.add(m=1.0)                                   # primary for the conversion only
-        temp_sim.add(m=0, a=a, e=e, inc=i, Omega=raan, omega=argp, M=M)
-        p = temp_sim.particles[1]
+        # --- Step 1: Convert theta to Equatorial Cartesian (position AND velocity) ---
+        # This replaces BOTH the temp_sim trick AND the finite-difference hack
+        r_helio_eq, v_helio_eq = kepler_to_state_and_vel(theta, 0.0, frame="equatorial")
+        x_eq, y_eq, z_eq = r_helio_eq
+        vx_eq, vy_eq, vz_eq = v_helio_eq
 
-        # --- Step 2: rotate ecliptic -> ICRF (equatorial) by obliquity about x ---
-        eps = np.radians(23.439291111)
-        ce, se = np.cos(eps), np.sin(eps)
-        x  = p.x
-        y  = p.y*ce - p.z*se
-        z  = p.y*se + p.z*ce
-        vx = p.vx
-        vy = p.vy*ce - p.vz*se
-        vz = p.vy*se + p.vz*ce
-
-        # --- Step 3: main simulation, now fully in ICRF ---
+        # --- Step 2: Setup simulation ---
         sim = rebound.Simulation()
         sim.units = ('AU', 'day', 'Msun')
-        sim.t = self.epoch.jd - self._ephem.jd_ref
+        # sim.ri_ias15.dt = 0.1
+        sim.ri_ias15.epsilon = 1e-9
 
-        sim.add(m=1.0)                                  # Sun (see note below)
-        extras = self._assist.Extras(sim, self._ephem)  # comment out to test pure two-body
+        extras = self._assist.Extras(sim, self._ephem)
 
-        sim.add(m=0, x=x, y=y, z=z, vx=vx, vy=vy, vz=vz)   # ICRF heliocentric state
+        # Add Sun at its pre-computed barycentric position
+        sun = self._sun_epoch
+        sim.add(m=1.0, x=sun.x, y=sun.y, z=sun.z,
+                vx=sun.vx, vy=sun.vy, vz=sun.vz)
 
-        sun_bary_obs   = get_body_barycentric('sun',   t)
-        earth_bary_obs = get_body_barycentric('earth', t)
-        obs_x = earth_bary_obs.x.to(u.AU).value - sun_bary_obs.x.to(u.AU).value
-        obs_y = earth_bary_obs.y.to(u.AU).value - sun_bary_obs.y.to(u.AU).value
-        obs_z = earth_bary_obs.z.to(u.AU).value - sun_bary_obs.z.to(u.AU).value
-        if observer_location is not None:
-            oc = observer_location.get_gcrs(t).cartesian
-            obs_x += oc.x.to(u.AU).value; obs_y += oc.y.to(u.AU).value; obs_z += oc.z.to(u.AU).value
+        # Add asteroid at BARYCENTRIC position (heliocentric + Sun barycentric)
+        sim.add(m=0.0,
+                x=x_eq + sun.x, y=y_eq + sun.y, z=z_eq + sun.z,
+                vx=vx_eq + sun.vx, vy=vy_eq + sun.vy, vz=vz_eq + sun.vz)
 
+        sim.t = self._epoch_rel
 
-        # --- Step 4: light-time iteration (unchanged) ---
-        c_au_per_day = 173.14463267424034
-        t_emit = t.jd - self._ephem.jd_ref
+        # --- Step 3: Light-time iteration ---
+        t_obs_tdb = t.tdb
+        tau = 0.0
+
         for _ in range(self.light_time_iterations):
-            # t_emit_time = Time(t_emit + self._ephem.jd_ref, format='jd', scale='tdb')
+            t_emit_tdb = Time(t_obs_tdb.jd - tau, format='jd', scale='tdb')
+            t_emit_rel = t_emit_tdb.jd - self._ephem.jd_ref
 
-            # sim.integrate(t_emit)
-            extras.integrate_or_interpolate(t_emit)  
-            particle = sim.particles[1]                 # index 1 (0 = Sun)
-            ast_x, ast_y, ast_z = particle.x, particle.y, particle.z
-            dx, dy, dz = ast_x-obs_x, ast_y-obs_y, ast_z-obs_z
-            r_topo = np.sqrt(dx*dx + dy*dy + dz*dz)
-            t_emit = (t.jd - self._ephem.jd_ref) - r_topo / c_au_per_day
+            extras.integrate_or_interpolate(t_emit_rel)
 
-        # --- Step 5: geometry (unchanged) ---
-        r_helio = np.sqrt(ast_x**2 + ast_y**2 + ast_z**2)
-        ra  = np.arctan2(dy, dx);  dec = np.arctan2(dz, np.sqrt(dx*dx + dy*dy))
-        if ra < 0: ra += 2*np.pi
-        cos_phase = np.clip(np.dot([ast_x,ast_y,ast_z],[dx,dy,dz])/(r_helio*r_topo), -1, 1)
-        
-        return Geometry(
-            ra=ra,
-            dec=dec,
-            r_helio=r_helio,
-            r_topo=r_topo,
-            phase_angle=np.arccos(cos_phase),
-            light_time=r_topo/c_au_per_day
-            )
+            observer_bary = self._cached_observer_barycentric(t_emit_tdb, observer_location)
+
+            ast = sim.particles[1]
+            topo_vec = np.array([ast.x, ast.y, ast.z]) - observer_bary
+            r_topo = float(np.linalg.norm(topo_vec))
+            tau = r_topo / C_AU_PER_DAY
+
+        # --- Step 4: Compute final geometry ---
+        sun_emit = self._ephem.get_particle("Sun", t_emit_rel)
+        ast_helio_vec = np.array([ast.x - sun_emit.x, ast.y - sun_emit.y, ast.z - sun_emit.z])
+        r_helio = float(np.linalg.norm(ast_helio_vec))
+
+        ra = np.arctan2(topo_vec[1], topo_vec[0]) % (2 * np.pi)
+        dec = np.arcsin(np.clip(topo_vec[2] / r_topo, -1.0, 1.0))
+
+        r_obs = float(np.linalg.norm(observer_bary - np.array([sun_emit.x, sun_emit.y, sun_emit.z])))
+        cos_alpha = (r_helio**2 + r_topo**2 - r_obs**2) / (2.0 * r_helio * r_topo)
+        phase_angle = np.arccos(np.clip(cos_alpha, -1.0, 1.0))
+
+        return Geometry(ra=ra, dec=dec, r_helio=r_helio, r_topo=r_topo,
+                        phase_angle=phase_angle, light_time=tau)
