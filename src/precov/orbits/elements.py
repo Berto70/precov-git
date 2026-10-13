@@ -105,3 +105,68 @@ def kepler_to_state(theta: np.ndarray, dt_days: np.ndarray, frame: str = "equato
     r_eq = r_ecl @ Rx.T
 
     return r_eq if r_eq.shape[0] > 1 else r_eq[0]
+
+def kepler_to_state_and_vel(theta: np.ndarray, dt_days: np.ndarray, frame: str = "equatorial"):
+    """Propagate Keplerian elements and return BOTH position and velocity.
+    
+    Returns
+    -------
+    r_helio : ndarray, shape (..., 3)
+        Heliocentric position vector(s), in au.
+    v_helio : ndarray, shape (..., 3)
+        Heliocentric velocity vector(s), in au/day.
+    """
+    a, e, i, raan, argp, M0 = theta
+    dt_days = np.atleast_1d(np.asarray(dt_days, dtype=float))
+
+    n = np.sqrt(GM_SUN / a**3)  # mean motion, rad/day
+    Mt = M0 + n * dt_days
+
+    E = solve_kepler_equation(Mt, e)
+
+    cosE, sinE = np.cos(E), np.sin(E)
+    
+    # Position in perifocal frame
+    x_pf = a * (cosE - e)
+    y_pf = a * np.sqrt(max(1.0 - e**2, 0.0)) * sinE
+    z_pf = np.zeros_like(x_pf)
+
+    # Velocity in perifocal frame (analytical, exact)
+    # v = dr/dt = (dr/dE) * (dE/dt), where dE/dt = n / (1 - e*cos(E))
+    Edot = n / (1.0 - e * cosE)  # dE/dt
+    vx_pf = -a * sinE * Edot
+    vy_pf = a * np.sqrt(max(1.0 - e**2, 0.0)) * cosE * Edot
+    vz_pf = np.zeros_like(x_pf)
+
+    r_pf = np.stack([x_pf, y_pf, z_pf], axis=-1)
+    v_pf = np.stack([vx_pf, vy_pf, vz_pf], axis=-1)
+
+    # Rotate perifocal -> ecliptic via the classical 3-1-3 Euler sequence
+    cO, sO = np.cos(raan), np.sin(raan)
+    ci, si = np.cos(i), np.sin(i)
+    cw, sw = np.cos(argp), np.sin(argp)
+
+    R = np.array([
+        [cO * cw - sO * sw * ci, -cO * sw - sO * cw * ci, sO * si],
+        [sO * cw + cO * sw * ci, -sO * sw + cO * cw * ci, -cO * si],
+        [sw * si,                 cw * si,                 ci],
+    ])
+
+    r_ecl = r_pf @ R.T
+    v_ecl = v_pf @ R.T
+
+    if frame == "ecliptic":
+        r_out = r_ecl if r_ecl.shape[0] > 1 else r_ecl[0]
+        v_out = v_ecl if v_ecl.shape[0] > 1 else v_ecl[0]
+        return r_out, v_out
+
+    # Rotate ecliptic -> equatorial
+    eps = OBLIQUITY_J2000_RAD
+    ce, se = np.cos(eps), np.sin(eps)
+    Rx = np.array([[1, 0, 0], [0, ce, -se], [0, se, ce]])
+    r_eq = r_ecl @ Rx.T
+    v_eq = v_ecl @ Rx.T
+
+    r_out = r_eq if r_eq.shape[0] > 1 else r_eq[0]
+    v_out = v_eq if v_eq.shape[0] > 1 else v_eq[0]
+    return r_out, v_out
