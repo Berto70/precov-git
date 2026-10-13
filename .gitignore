@@ -1,3 +1,11 @@
 src/precov/__pycache__/
 .precov/
 src/precov.egg-info/
+src/precov/data/__pycache__/
+src/precov/images/__pycache__/
+src/precov/linking/__pycache__/
+src/precov/orbits/__pycache__/
+src/precov/survey/__pycache__/
+tests/__pycache__/
+data/ztf_cache/
+.pytest_cache/
