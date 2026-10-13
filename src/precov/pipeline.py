@@ -25,6 +25,7 @@ from .constants import (
 )
 from .data_models import Observation, PrediscoveryResult
 from .images.detection import extract_sources
+from .images.jacobian_region import compute_search_region_jacobian
 from .images.footprint import compute_search_region, photometric_viability
 from .linking.consensus import verify_mutual_consensus
 from .linking.linker import candidate_to_observation, link_all_candidates
@@ -82,21 +83,31 @@ class PrediscoveryPipeline:
         )
 
         # --- Stage 3: per-image viability gating + search regions (Sec. 3.2) ---
+        # Use ASSIST (fine_propagator) for BOTH viability and search regions,
+        # since the Jacobian method makes it fast enough (12 integrations/image).
         images = {img.image_id: img for img in self.survey.list_images()}
         search_regions = {}
         for image_id, image in images.items():
-            # Use COARSE propagator here for speed (wide search)
+            # Photometric viability (uses best-fit orbit)
             viable, V_pred = photometric_viability(
                 fit.theta, image.t, self.H, self.G, image.limiting_mag_3sigma,
-                self.propagator, buffer_mag=self.mag_buffer,
+                self.fine_propagator,  # <-- USE ASSIST HERE
+                buffer_mag=self.mag_buffer,
                 observer_location=image.observer_location,
             )
             if not viable:
                 continue
-            region = compute_search_region(
-                theta_samples, image.t, image.wcs, image.shape, self.propagator,
-                buffer_px=self.hull_buffer_px, predicted_mag=V_pred,
-                image_id=image_id, observer_location=image.observer_location,
+            
+            # Search region via Jacobian method (12 ASSIST integrations)
+            region = compute_search_region_jacobian(
+                fit.theta, fit.covariance,
+                image.t, image.wcs, image.shape,
+                self.fine_propagator,  # <-- USE ASSIST HERE
+                confidence_q=self.confidence_q,
+                buffer_px=self.hull_buffer_px,
+                predicted_mag=V_pred,
+                image_id=image_id,
+                observer_location=image.observer_location,
             )
             if region is not None:
                 search_regions[image_id] = region
