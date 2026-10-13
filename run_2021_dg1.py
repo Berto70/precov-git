@@ -152,21 +152,39 @@ def main():
     postdiscovery_obs = fetch_postdiscovery_observations(target, default_sigma_arcsec=2.0)
     
     # 3. Get initial orbit guess (Hardcoded for 2021 DG1 to avoid Horizons timeouts)
-    print("\n[3/5] Setting initial orbit guess...")
-    theta0_guess = np.array([1.65, 0.4, np.radians(10.0), np.radians(100.0), np.radians(50.0), np.radians(0.0)])
+    print("\n[3/5] Setting initial orbit guess from JPL/MOST reference elements...")
+    
+    # MOST/JPL elements at epoch 2021-01-01 (MJD 59215)
+    # We need to advance M to our fit epoch (2021-03-11)
+    # Mean motion: n = sqrt(GM/a^3) ≈ 0.465 deg/day
+    # Days from 2021-01-01 to 2021-03-11 = 69 days
+    # ΔM = 0.465 * 69 ≈ 32.1 deg
+    M_jpl_epoch = 14.9260  # deg at 2021-01-01
+    M_fit_epoch = M_jpl_epoch + 32.1  # deg at 2021-03-11
+    
+    theta0_guess = np.array([
+        1.650247,                    # a (AU) — from MOST/JPL
+        0.534264,                    # e
+        np.radians(32.4322),         # i
+        np.radians(160.5932),        # Ω
+        np.radians(251.2802),        # ω
+        np.radians(M_fit_epoch),     # M (advanced to fit epoch)
+    ])
     
     # 4. Set up the propagators (Hybrid Strategy)
     print("\n[4/5] Setting up propagators and downloading ephemeris kernels...")
-    epoch = Time("2021-03-11T12:00:00", scale="tdb")
-    coarse_propagator = TwoBodyKeplerPropagator(epoch=epoch)
+    epoch = Time("2021-03-11T12:00:00", scale="tdb")  # Midpoint of ZTF survey
     
     planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=False)
     try:
-        fine_propagator = ASSISTPropagator(epoch=epoch, planets_path=planets_path, asteroids_path=asteroids_path)
+        fine_propagator = ASSISTPropagator(
+            epoch=epoch, planets_path=planets_path, asteroids_path=asteroids_path
+        )
         print("Successfully initialized ASSISTPropagator (N-body).")
     except Exception as e:
-        print(f"Warning: Failed to initialize ASSISTPropagator ({e}). Falling back to Two-Body.")
-        fine_propagator = coarse_propagator
+        print(f"Warning: Failed to initialize ASSISTPropagator ({e}).")
+        print("Falling back to Two-Body.")
+        fine_propagator = TwoBodyKeplerPropagator(epoch=epoch)
 
     # 5. Load Survey Provider and Run Pipeline
     print("\n[5/5] Loading ZTF survey provider and running pipeline...")
@@ -178,19 +196,19 @@ def main():
     time_in = time()
 
     pipeline = PrediscoveryPipeline(
-        propagator=coarse_propagator,       # Fast Two-Body for wide search
-        fine_propagator=fine_propagator,    # Precise ASSIST for linking
+        propagator=fine_propagator,       # ASSIST for search regions (Jacobian makes it fast)
+        fine_propagator=fine_propagator,  # ASSIST for linking
         survey=provider,
-        H=22.0,                             # Absolute magnitude of 2021 DG1
-        G=0.15,                             
-        M_samples=20000,                    # Paper uses 20,000 boundary samples
-        confidence_q=0.9999,                # 99.99% confidence boundary sampling
-        detection_sigma=4.0,                # 4-sigma threshold for DAOStarFinder
-        hull_buffer_px=500.0,               # 500 px buffer to avoid banana artifacts
-        mag_buffer=1.0,                     # Soften magnitude threshold
-        alpha=0.5,                          # Prior probability of detection
-        significance_threshold=0.0,        # >10 sigma separates prediscoveries
-        huber_c=1.0,                        # Huber loss factor for robust fitting
+        H=22.0,
+        G=0.15,
+        M_samples=20000,  # Still stored but no longer used for search regions
+        confidence_q=0.9999,
+        detection_sigma=4.0,
+        hull_buffer_px=500.0,
+        mag_buffer=1.0,
+        alpha=0.5,
+        significance_threshold=10.0,
+        huber_c=1.0,
     )
 
     print("\nRunning pipeline (this may take a while depending on image count)...")
@@ -224,6 +242,73 @@ def main():
             print("\nOrbital arc successfully extended!")
     else:
         print("\nNo confirmed prediscoveries found above the 10-sigma threshold.")
+
+
+        # --- DIAGNOSTIC: Check the fitted orbit vs. known orbit ---
+    print("\n" + "="*70)
+    print("ORBIT DIAGNOSTIC")
+    print("="*70)
+    print(f"Fitted elements (a, e, i, Ω, ω, M):")
+    print(f"  a    = {result.postdiscovery_fit.theta[0]:.6f} AU")
+    print(f"  e    = {result.postdiscovery_fit.theta[1]:.6f}")
+    print(f"  i    = {np.degrees(result.postdiscovery_fit.theta[2]):.4f} deg")
+    print(f"  Ω    = {np.degrees(result.postdiscovery_fit.theta[3]):.4f} deg")
+    print(f"  ω    = {np.degrees(result.postdiscovery_fit.theta[4]):.4f} deg")
+    print(f"  M    = {np.degrees(result.postdiscovery_fit.theta[5]):.4f} deg")
+    
+    # Compare with MOST/JPL reference elements
+    print(f"\nMOST/JPL reference elements (2021-01-01 epoch):")
+    print(f"  a    = 1.650247 AU")
+    print(f"  e    = 0.534264")
+    print(f"  i    = 32.4322 deg")
+    print(f"  Ω    = 160.5932 deg")
+    print(f"  ω    = 251.2802 deg")
+    print(f"  M    = 14.9260 deg")
+    
+    # Check how many images are close to the viability threshold
+    print(f"\nPhotometric viability breakdown:")
+    n_total = 0
+    n_viable = 0
+    for img in provider.list_images():
+        geom = fine_propagator.geometry(result.postdiscovery_fit.theta, img.t, img.observer_location)
+        from precov.images.photometry import hg_apparent_magnitude
+        V_pred = hg_apparent_magnitude(22.0, 0.15, geom.r_helio, geom.r_topo, geom.phase_angle)
+        n_total += 1
+        if V_pred <= img.limiting_mag_3sigma + 1.0:
+            n_viable += 1
+    print(f"  Total images: {n_total}")
+    print(f"  Viable (V_pred < lim + 1): {n_viable}")
+
+    # check search region placement
+    print("\n" + "="*70)
+    print("SEARCH REGION DIAGNOSTIC")
+    print("="*70)
+    for img in provider.list_images()[:5]:  # Check first 5 images
+        geom = fine_propagator.geometry(result.postdiscovery_fit.theta, img.t, img.observer_location)
+        x_pred, y_pred = img.wcs.world_to_pixel_values(np.degrees(geom.ra), np.degrees(geom.dec))
+        ny, nx = img.shape
+        in_image = 0 <= x_pred <= nx and 0 <= y_pred <= ny
+        print(f"  {img.image_id}: pred=({x_pred:.0f}, {y_pred:.0f}), "
+              f"image=({nx}x{ny}), inside={in_image}")
+
+        # --- DIAGNOSTIC: Covariance size ---
+    print("\n" + "="*70)
+    print("COVARIANCE DIAGNOSTIC")
+    print("="*70)
+    cov = result.postdiscovery_fit.covariance
+    param_names = ['a (AU)', 'e', 'i (rad)', 'Ω (rad)', 'ω (rad)', 'M (rad)']
+    print("  Parameter     σ (1-sigma)")
+    for i, name in enumerate(param_names):
+        sigma = np.sqrt(cov[i, i])
+        print(f"  {name:12s}  {sigma:.6e}")
+    
+    # How many sigma away is JPL's 'a' from our fit?
+    a_fit = result.postdiscovery_fit.theta[0]
+    a_jpl = 1.650247
+    sigma_a = np.sqrt(cov[0, 0])
+    n_sigma = abs(a_fit - a_jpl) / sigma_a
+    print(f"\n  JPL 'a' is {n_sigma:.1f}σ away from fitted 'a'")
+    print(f"  (σ_a = {sigma_a:.6f} AU, Δa = {abs(a_fit - a_jpl):.6f} AU)")
 
 if __name__ == "__main__":
     main()
