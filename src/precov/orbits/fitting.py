@@ -107,9 +107,15 @@ def fit_orbit(observations: List[Observation], propagator: Propagator,
         xtol=1e-12, ftol=1e-12, gtol=1e-12, max_nfev=4000,
     )
 
-    J = result.jac  # (2N, 6)
-    FIM = J.T @ J
-    covariance = np.linalg.pinv(FIM)
+    # J = result.jac  # (2N, 6)
+    # dof = len(result.residuals) - len(theta0)
+    # FIM = J.T @ J
+    # covariance = np.linalg.pinv(FIM)
+
+    J = result.jac
+    dof = len(result.fun) - len(theta0)
+    s_squared = 2.0 * result.cost / dof  # ≈ reduced chi-square
+    covariance = np.linalg.inv(J.T @ J) * s_squared
 
     n_obs = len(observations)
     reduced_chi2 = float(2 * result.cost / max(2 * n_obs - 6, 1))
