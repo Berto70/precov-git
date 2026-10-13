@@ -5,6 +5,7 @@ from precov.data.mpc_fetcher import fetch_postdiscovery_observations
 from precov.orbits.propagator import ASSISTPropagator
 from precov.orbits.kernels import ensure_kernels_downloaded
 from precov.orbits.fitting import fit_orbit
+from time import time
 
 target = "2021 DG1"
 epoch = Time("2021-03-11T12:00:00", scale="tdb")
@@ -21,9 +22,10 @@ prop = ASSISTPropagator(epoch=epoch, planets_path=planets_path, asteroids_path=a
 # =========================================================================
 # PART A: Does the propagator actually respond to theta?
 # =========================================================================
+time_in = time()
 print("\n=== PART A: propagator response to theta perturbations ===")
 theta_ref = np.array([1.6502, 0.5343, np.radians(32.43),
-                       np.radians(160.57), np.radians(251.31), np.radians(217.94)])
+                       np.radians(160.59), np.radians(251.28), np.radians(110.65)])
 t_test = obs[len(obs)//2].t
 g0 = prop.geometry(theta_ref, t_test)
 print(f"Reference at {t_test.iso}: RA={np.degrees(g0.ra):.4f}  Dec={np.degrees(g0.dec):.4f}")
@@ -46,9 +48,13 @@ if all_zero:
 else:
     print("  >>> Propagator responds to theta correctly.")
 
+time_out = time()
+print(f"\nPART A completed in {time_out - time_in:.2f} seconds.")
+
 # =========================================================================
 # PART B: Fit + covariance, comparing the two initial guesses
 # =========================================================================
+time_in = time()
 print("\n=== PART B: orbit fit + covariance eigenvalues ===")
 guesses = {
     "hardcoded (bad)": np.array([1.65, 0.4, np.radians(10.0),
@@ -68,3 +74,6 @@ for name, g in guesses.items():
         print(f"  is PD? {bool(np.all(eig > 0))}")
     except Exception as ex:
         print(f"  FIT FAILED: {ex}")
+
+time_out = time()
+print(f"\nPART B completed in {time_out - time_in:.2f} seconds.")

@@ -12,15 +12,15 @@ obs = fetch_postdiscovery_observations(target, default_sigma_arcsec=2.0)
 print(f"N observations: {len(obs)}")
 print(f"Arc: {obs[0].t.iso}  ->  {obs[-1].t.iso}")
 
-planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=True)
+planets_path, asteroids_path = ensure_kernels_downloaded(download_asteroids=False)
 prop = ASSISTPropagator(epoch=epoch, planets_path=planets_path, asteroids_path=asteroids_path)
 
 # True orbit (MOST/JPL elements, M advanced to the 2021-03-11 fit epoch)
 theta_true = np.array([1.6502, 0.5343, np.radians(32.43),
-                       np.radians(160.57), np.radians(251.31), np.radians(217.94)])
+                       np.radians(160.59), np.radians(251.28), np.radians(110.65)])
 
 # The bogus "good" solution from the previous diagnostic (a = 50.8 AU)
-theta_fit  = np.array([50.82667, 0.83809, -2.10562, 3.19255, 6.24221, -2.84007])
+theta_fit  = np.array([0.73225, 0.99976, 0.58226, 2.80099, -3.10802, 3.11377])
 
 def wrap(a):
     return (a + np.pi) % (2*np.pi) - np.pi
