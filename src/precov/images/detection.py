@@ -27,7 +27,10 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import numpy as np
-from astropy.stats import sigma_clipped_stats
+from astropy.stats import sigma_clipped_stats, SigmaClip
+from astropy.convolution import Gaussian2DKernel
+from photutils.segmentation import detect_sources
+from photutils.detection import DAOStarFinder
 
 from ..constants import DEFAULT_DETECTION_SIGMA
 from ..data_models import SourceCatalog
@@ -59,16 +62,20 @@ def extract_sources(image_data: np.ndarray, fwhm_px: float, image_id: str,
     """Run low-threshold source detection on `image_data`, optionally
     restricting the returned catalog to sources inside `search_region`'s
     convex hull.
-
-    Background statistics are estimated once over the *full* (unmasked)
-    image via sigma clipping, matching the paper's use of
-    `astropy.stats.sigma_clipped_stats`; the background source density
-    `rho` used downstream in the likelihood ratio is likewise a
-    whole-image quantity (Sec. 3.3), not restricted to the search region.
     """
+
+    # --- NaN/inf handling (must come BEFORE sigma_clipped_stats) ---
+    valid_mask = np.isfinite(image_data)
+    if not np.all(valid_mask):
+        valid_pixels = image_data[valid_mask]
+        _nan_fill = np.median(valid_pixels) if len(valid_pixels) > 100 else 0.0
+        image_data = np.where(valid_mask, image_data, _nan_fill)
+
+    # --- Background estimation (Sec. 3.3: sigma-clipped stats over full image) ---
     mean_bg, median_bg, std_bg = sigma_clipped_stats(image_data, sigma=3.0, mask=mask)
     data_sub = image_data - median_bg
 
+    # --- Source detection ---
     try:
         from photutils.detection import DAOStarFinder
 
@@ -78,9 +85,6 @@ def extract_sources(image_data: np.ndarray, fwhm_px: float, image_id: str,
             xy = np.zeros((0, 2))
             flux = np.zeros(0)
         else:
-            # photutils >= 3.0 renamed xcentroid/ycentroid -> x_centroid/
-            # y_centroid (old names remain as a deprecated alias); prefer the
-            # new names when present so we don't emit a warning on every call.
             xcol = "x_centroid" if "x_centroid" in table.colnames else "xcentroid"
             ycol = "y_centroid" if "y_centroid" in table.colnames else "ycentroid"
             xy = np.column_stack([table[xcol], table[ycol]])
@@ -90,6 +94,7 @@ def extract_sources(image_data: np.ndarray, fwhm_px: float, image_id: str,
 
     n_total_detections = len(xy)
 
+    # --- Background source density rho (Sec. 3.3: whole-image quantity) ---
     if mask is not None:
         n_unmasked = int(np.sum(~mask))
     else:
@@ -97,6 +102,7 @@ def extract_sources(image_data: np.ndarray, fwhm_px: float, image_id: str,
 
     rho = n_total_detections / max(n_unmasked, 1)
 
+    # --- Restrict to search region (Sec. 3.3) ---
     if search_region is not None and len(xy) > 0:
         keep = points_in_hull(xy, search_region.hull_vertices_xy)
         xy, flux = xy[keep], flux[keep]
