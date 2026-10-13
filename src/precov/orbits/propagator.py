@@ -185,6 +185,7 @@ class ASSISTPropagator(Propagator):
 
         # --- Step 1: orbital elements (ecliptic) -> ecliptic Cartesian ---
         temp_sim = rebound.Simulation()
+        temp_sim.units = ('AU', 'day', 'Msun')  
         temp_sim.add(m=1.0)                                   # primary for the conversion only
         temp_sim.add(m=0, a=a, e=e, inc=i, Omega=raan, omega=argp, M=M)
         p = temp_sim.particles[1]
@@ -205,25 +206,28 @@ class ASSISTPropagator(Propagator):
         sim.t = self.epoch.jd - self._ephem.jd_ref
 
         sim.add(m=1.0)                                  # Sun (see note below)
-        # extras = self._assist.Extras(sim, self._ephem)  # comment out to test pure two-body
+        extras = self._assist.Extras(sim, self._ephem)  # comment out to test pure two-body
 
         sim.add(m=0, x=x, y=y, z=z, vx=vx, vy=vy, vz=vz)   # ICRF heliocentric state
+
+        sun_bary_obs   = get_body_barycentric('sun',   t)
+        earth_bary_obs = get_body_barycentric('earth', t)
+        obs_x = earth_bary_obs.x.to(u.AU).value - sun_bary_obs.x.to(u.AU).value
+        obs_y = earth_bary_obs.y.to(u.AU).value - sun_bary_obs.y.to(u.AU).value
+        obs_z = earth_bary_obs.z.to(u.AU).value - sun_bary_obs.z.to(u.AU).value
+        if observer_location is not None:
+            oc = observer_location.get_gcrs(t).cartesian
+            obs_x += oc.x.to(u.AU).value; obs_y += oc.y.to(u.AU).value; obs_z += oc.z.to(u.AU).value
+
 
         # --- Step 4: light-time iteration (unchanged) ---
         c_au_per_day = 173.14463267424034
         t_emit = t.jd - self._ephem.jd_ref
         for _ in range(self.light_time_iterations):
-            t_emit_time = Time(t_emit + self._ephem.jd_ref, format='jd', scale='tdb')
-            sun_bary   = get_body_barycentric('sun',   t_emit_time)
-            earth_bary = get_body_barycentric('earth', t_emit_time)
-            obs_x = earth_bary.x.to(u.AU).value - sun_bary.x.to(u.AU).value
-            obs_y = earth_bary.y.to(u.AU).value - sun_bary.y.to(u.AU).value
-            obs_z = earth_bary.z.to(u.AU).value - sun_bary.z.to(u.AU).value
-            if observer_location is not None:
-                oc = observer_location.get_gcrs(t_emit_time).cartesian
-                obs_x += oc.x.to(u.AU).value; obs_y += oc.y.to(u.AU).value; obs_z += oc.z.to(u.AU).value
+            # t_emit_time = Time(t_emit + self._ephem.jd_ref, format='jd', scale='tdb')
 
-            sim.integrate(t_emit)
+            # sim.integrate(t_emit)
+            extras.integrate_or_interpolate(t_emit)  
             particle = sim.particles[1]                 # index 1 (0 = Sun)
             ast_x, ast_y, ast_z = particle.x, particle.y, particle.z
             dx, dy, dz = ast_x-obs_x, ast_y-obs_y, ast_z-obs_z
@@ -235,5 +239,12 @@ class ASSISTPropagator(Propagator):
         ra  = np.arctan2(dy, dx);  dec = np.arctan2(dz, np.sqrt(dx*dx + dy*dy))
         if ra < 0: ra += 2*np.pi
         cos_phase = np.clip(np.dot([ast_x,ast_y,ast_z],[dx,dy,dz])/(r_helio*r_topo), -1, 1)
-        return Geometry(ra=ra, dec=dec, r_helio=r_helio, r_topo=r_topo,
-                        phase_angle=np.arccos(cos_phase), light_time=r_topo/c_au_per_day)
+        
+        return Geometry(
+            ra=ra,
+            dec=dec,
+            r_helio=r_helio,
+            r_topo=r_topo,
+            phase_angle=np.arccos(cos_phase),
+            light_time=r_topo/c_au_per_day
+            )
