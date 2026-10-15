@@ -161,7 +161,43 @@ def link_all_candidates(
 ) -> List[LinkResult]:
     """Wrapper that loops over all catalogs and calls evaluate_candidate."""
     all_results = []
-    cov_cache = ExemplarCovarianceCache(postdiscovery_obs, propagator, theta_base, search_images, huber_c)
+
+    # Build the arguments for ExemplarCovarianceCache
+    image_epochs = {iid: img.t for iid, img in search_images.items()}
+    image_wcs = {iid: img.wcs for iid, img in search_images.items()}
+    observer_locations = {iid: img.observer_location for iid, img in search_images.items()}
+
+    # Define the refit_exemplar callable
+    def refit_exemplar(origin_image_id: str):
+        """Refit the orbit using an exemplar source from the origin image."""
+        catalog = catalogs[origin_image_id]
+        # Pick the first source as the exemplar (or the brightest)
+        exemplar_idx = 0
+        xy = catalog.xy[exemplar_idx]
+        
+        # Convert to a CandidateSource and then to an Observation
+        from ..data_models import CandidateSource
+        candidate = CandidateSource(
+            image_id=origin_image_id,
+            source_index=exemplar_idx,
+            xy=(float(xy[0]), float(xy[1])),
+            ra=0.0, dec=0.0, sigma_centroid_px=1.0,  # placeholder, will be set properly
+        )
+        cand_obs = candidate_to_observation(candidate, search_images[origin_image_id])
+        
+        # Refit orbit with this candidate appended
+        from ..orbits.fitting import fit_orbit
+        trial_obs = postdiscovery_obs + [cand_obs]
+        return fit_orbit(trial_obs, propagator, theta_base, c=huber_c)
+
+    cov_cache = ExemplarCovarianceCache(
+        propagator=propagator,
+        image_epochs=image_epochs,
+        image_wcs=image_wcs,
+        refit_exemplar=refit_exemplar,
+        observer_locations=observer_locations,
+        max_shift_px=10.0,
+    )
     
     for image_id, catalog in catalogs.items():
         for idx, xy in enumerate(catalog.xy):
