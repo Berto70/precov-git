@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precov"
-version = "0.1.0"
+version = "0.3.0"
 description = "A probabilistic asteroid prediscovery pipeline, after Li, Geringer-Sameth & Golovich (2026), AJ 172:91"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Pablo & Claudio (reproduction study)" },
+    { name = "Gabriele Bertinelli (reproduction study)" },
 ]
 dependencies = [
     "numpy>=1.24",
